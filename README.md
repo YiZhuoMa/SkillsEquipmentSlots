@@ -10,6 +10,11 @@ As your collection of skills grows it gets hard to keep track of which ones are
 active. This tool turns that into a game — a tome shelf on the left, an
 equipment grid on the right.
 
+![Claude Skill Equipment — web UI demo](docs/demo-en.png)
+
+> The slot with the ⚠️ badge has an unequipped dependency — see
+> [Dependency detection](#dependency-detection).
+
 ## Why "equip" actually works
 
 This is not a cosmetic toggle. Enabling / disabling physically moves the skill
