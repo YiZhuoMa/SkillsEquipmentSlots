@@ -215,12 +215,12 @@ def build_state():
 # ----------------------------- 文件操作 ------------------------------------
 
 class ApiError(Exception):
-    pass
+    """message 为错误码(见前端 I18N.errors), 前端按当前语言翻译。"""
 
 
 def _valid_dir(name):
     if not name or not DIR_RE.match(name):
-        raise ApiError("非法的目录名")
+        raise ApiError("bad_dir")
     return name
 
 
@@ -230,21 +230,21 @@ def do_equip(dir_name, slot):
     try:
         slot = int(slot)
     except (TypeError, ValueError):
-        raise ApiError("格子编号无效")
+        raise ApiError("bad_slot")
     if not (0 <= slot < NUM_SLOTS):
-        raise ApiError("格子编号超出范围")
+        raise ApiError("slot_out_of_range")
 
     src = os.path.join(ARMORY_DIR, dir_name)
     dst = os.path.join(SKILLS_DIR, dir_name)
     if not os.path.isfile(os.path.join(src, "SKILL.md")):
-        raise ApiError("仓库中找不到该 skill")
+        raise ApiError("not_in_armory")
     if os.path.exists(dst):
-        raise ApiError("目标目录已存在, 已取消(不覆盖)")
+        raise ApiError("dst_exists")
 
     layout = load_layout()
     layout = {s: d for s, d in layout.items() if d != dir_name}
     if str(slot) in layout:
-        raise ApiError("该格子已被占用")
+        raise ApiError("slot_taken")
 
     shutil.move(src, dst)
     layout[str(slot)] = dir_name
@@ -257,10 +257,10 @@ def do_unequip(dir_name):
     src = os.path.join(SKILLS_DIR, dir_name)
     dst = os.path.join(ARMORY_DIR, dir_name)
     if not os.path.isfile(os.path.join(src, "SKILL.md")):
-        raise ApiError("装备栏中找不到该 skill")
+        raise ApiError("not_in_equip")
     os.makedirs(ARMORY_DIR, exist_ok=True)   # 首次卸下时才创建仓库
     if os.path.exists(dst):
-        raise ApiError("仓库中已存在同名目录, 已取消(不覆盖)")
+        raise ApiError("armory_name_clash")
 
     shutil.move(src, dst)
     layout = load_layout()
@@ -271,7 +271,7 @@ def do_unequip(dir_name):
 def do_arrange(new_layout):
     """仅调整格子位置, 不动文件。"""
     if not isinstance(new_layout, dict):
-        raise ApiError("layout 格式错误")
+        raise ApiError("bad_layout")
     equipped_dirs = {s["dir"] for s in scan_dir(SKILLS_DIR)}
     cleaned, seen = {}, set()
     for slot, d in new_layout.items():
@@ -316,9 +316,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._send_json(build_state())
             except Exception as e:                       # noqa: BLE001
-                self._send_json({"error": str(e)}, 500)
+                self._send_json({"error": "server_error", "detail": str(e)}, 500)
         else:
-            self._send_json({"error": "not found"}, 404)
+            self._send_json({"error": "not_found"}, 404)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -326,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw or b"{}")
         except ValueError:
-            self._send_json({"error": "请求体不是合法 JSON"}, 400)
+            self._send_json({"error": "bad_json"}, 400)
             return
 
         try:
@@ -337,13 +337,13 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/arrange":
                 do_arrange(payload.get("layout"))
             else:
-                self._send_json({"error": "not found"}, 404)
+                self._send_json({"error": "not_found"}, 404)
                 return
         except ApiError as e:
             self._send_json({"error": str(e)}, 400)
             return
         except Exception as e:                           # noqa: BLE001
-            self._send_json({"error": "操作失败: " + str(e)}, 500)
+            self._send_json({"error": "server_error", "detail": str(e)}, 500)
             return
 
         self._send_json(build_state())
@@ -355,7 +355,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude 技能装备栏</title>
+<title>Claude Skill Equipment</title>
 <style>
   :root{
     --bg:#0d0a07; --panel:#1a140d; --panel2:#221a10;
@@ -427,7 +427,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     transition:border-color .15s,box-shadow .15s;
   }
   .slot.empty::after{
-    content:"空"; color:#3a2f1c; font-size:13px; position:absolute;
+    content:attr(data-label); color:#3a2f1c; font-size:13px; position:absolute;
   }
   .slot.filled{cursor:grab; border-color:var(--gold);
     box-shadow:inset 0 0 16px rgba(0,0,0,.7),0 0 14px rgba(200,162,74,.3);}
@@ -464,27 +464,36 @@ PAGE_HTML = r"""<!DOCTYPE html>
     max-width:1080px; margin:0 auto 22px; padding:0 22px;
     color:var(--text-dim); font-size:12px; text-align:center; line-height:1.7;
   }
+  /* 语言切换按钮 */
+  #lang-btn{
+    position:fixed; top:14px; right:18px; z-index:101;
+    background:var(--panel2); color:var(--gold-bright);
+    border:1px solid var(--gold-dim); border-radius:5px;
+    padding:5px 13px; font-size:13px; cursor:pointer;
+    font-family:inherit; letter-spacing:1px;
+    transition:border-color .15s,box-shadow .15s;
+  }
+  #lang-btn:hover{border-color:var(--gold);
+    box-shadow:0 0 10px rgba(200,162,74,.35);}
 </style>
 </head>
 <body>
-  <h1>⚔ 技能装备栏 ⚔</h1>
-  <div class="sub">将左侧技能典籍拖入右侧装备栏即可启用 · 拖出即收回仓库</div>
+  <button id="lang-btn"></button>
+  <h1 id="h1"></h1>
+  <div class="sub" id="sub"></div>
 
   <div class="wrap">
     <div class="col" id="armory">
-      <div class="col-head">📚 技能典籍（未装备）</div>
+      <div class="col-head" id="armory-head"></div>
       <div id="armory-list"></div>
     </div>
     <div class="col" id="equip">
-      <div class="col-head">🛡 装备栏</div>
+      <div class="col-head" id="equip-head"></div>
       <div id="grid"></div>
     </div>
   </div>
 
-  <div class="note">
-    生效机制：装备 = 目录移入 <code>~/.claude/skills/</code>；卸下 = 移入 <code>~/.claude/skills-armory/</code>。<br>
-    Claude Code 在会话启动时加载 skill，<b>装备 / 卸下后需重启 Claude 会话才生效</b>。
-  </div>
+  <div class="note" id="note"></div>
 
   <div id="tip"></div>
   <div id="toast"></div>
@@ -492,6 +501,77 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <script>
 const NUM_SLOTS_FALLBACK = 12;
 let STATE = {equipped:[], stored:[], layout:{}, num_slots:NUM_SLOTS_FALLBACK};
+
+/* ---- 中英文文案 ---- */
+const I18N = {
+  zh: {
+    htmlLang:"zh-CN",
+    title:"Claude 技能装备栏",
+    h1:"⚔ 技能装备栏 ⚔",
+    sub:"将左侧技能典籍拖入右侧装备栏即可启用 · 拖出即收回仓库",
+    armoryHead:"📚 技能典籍（未装备）",
+    equipHead:"🛡 装备栏",
+    armoryEmpty:"仓库空空如也 —— 所有技能皆已装备",
+    emptySlot:"空",
+    note:'生效机制：装备 = 目录移入 <code>~/.claude/skills/</code>；'
+       + '卸下 = 移入 <code>~/.claude/skills-armory/</code>。<br>'
+       + 'Claude Code 在会话启动时加载 skill，'
+       + '<b>装备 / 卸下后需重启 Claude 会话才生效</b>。',
+    noDesc:"（该 skill 无 description）",
+    depWarnHead:"⚠️ 依赖未装备：",
+    depWarnTail:"<br>此 skill 运行时会读取它们的文件，建议一并装备。",
+    depSep:"、",
+    toggle:"EN",
+    toastEquipped:"已装备",
+    toastUnequipped:"已收回仓库",
+    netErr:"网络错误：",
+    errors:{
+      bad_dir:"非法的目录名", bad_slot:"格子编号无效",
+      slot_out_of_range:"格子编号超出范围", not_in_armory:"仓库中找不到该 skill",
+      dst_exists:"目标目录已存在，已取消（不会覆盖）",
+      slot_taken:"该格子已被占用", not_in_equip:"装备栏中找不到该 skill",
+      armory_name_clash:"仓库中已存在同名目录，已取消（不会覆盖）",
+      bad_layout:"layout 格式错误", bad_json:"请求体不是合法 JSON",
+      not_found:"接口不存在", server_error:"服务器错误",
+    },
+  },
+  en: {
+    htmlLang:"en",
+    title:"Claude Skill Equipment",
+    h1:"⚔ Skill Equipment ⚔",
+    sub:"Drag a skill tome from the left into a slot to enable it · drag it out to return it",
+    armoryHead:"📚 Skill Tomes (Unequipped)",
+    equipHead:"🛡 Equipment Slots",
+    armoryEmpty:"The armory is empty — every skill is equipped",
+    emptySlot:"empty",
+    note:'How it works: equip = move the folder into <code>~/.claude/skills/</code>; '
+       + 'unequip = move it into <code>~/.claude/skills-armory/</code>.<br>'
+       + 'Claude Code loads skills at session start, so '
+       + '<b>restart your Claude session for equip / unequip to take effect</b>.',
+    noDesc:"(this skill has no description)",
+    depWarnHead:"⚠️ Missing dependencies: ",
+    depWarnTail:"<br>This skill reads their files at runtime — equip them together.",
+    depSep:", ",
+    toggle:"中",
+    toastEquipped:"Equipped",
+    toastUnequipped:"Returned to armory",
+    netErr:"Network error: ",
+    errors:{
+      bad_dir:"Invalid directory name", bad_slot:"Invalid slot number",
+      slot_out_of_range:"Slot number out of range",
+      not_in_armory:"Skill not found in the armory",
+      dst_exists:"Target directory already exists — cancelled (nothing overwritten)",
+      slot_taken:"That slot is already taken",
+      not_in_equip:"Skill not found in the equipment slots",
+      armory_name_clash:"A folder with that name already exists in the armory — "
+        + "cancelled (nothing overwritten)",
+      bad_layout:"Invalid layout format", bad_json:"Request body is not valid JSON",
+      not_found:"No such endpoint", server_error:"Server error",
+    },
+  },
+};
+let LANG = (localStorage.getItem("skill-armory-lang") === "zh") ? "zh" : "en";
+const T = () => I18N[LANG];
 
 const ICONS = {
   "deep-research":"🔍", "octopus-research":"🐙", "local-data-guide":"🗄️",
@@ -501,6 +581,8 @@ const iconOf = d => ICONS[d] || "📜";
 
 const $ = s => document.querySelector(s);
 const tip = $("#tip"), toast = $("#toast");
+const esc = s => (s||"").replace(/[&<>"]/g, c=>(
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 function showToast(msg, ok){
   toast.textContent = msg;
@@ -508,6 +590,12 @@ function showToast(msg, ok){
   toast.style.display = "block";
   clearTimeout(showToast._t);
   showToast._t = setTimeout(()=>toast.style.display="none", 2600);
+}
+
+/* 把服务端返回的错误码翻译成当前语言 */
+function errText(data){
+  const code = data && data.error;
+  return (T().errors[code]) || code || "error";
 }
 
 function skillByDir(d){
@@ -524,13 +612,13 @@ function missingDepsOf(skill){
 /* ---- tooltip ---- */
 function bindTip(el, skill){
   el.addEventListener("mousemove", e=>{
+    const t = T();
     let html = '<div class="t-nm">'+iconOf(skill.dir)+' '+esc(skill.name)+'</div>'
-      + esc(skill.description || "(该 skill 无 description)");
+      + esc(skill.description || t.noDesc);
     const miss = missingDepsOf(skill);
     if(miss.length){
-      html += '<div class="t-warn">⚠️ 依赖未装备：'
-        + miss.map(d=>esc(d)).join('、')
-        + '<br>此 skill 运行时会读取它们的文件，建议一并装备。</div>';
+      html += '<div class="t-warn">' + t.depWarnHead
+        + miss.map(d=>esc(d)).join(t.depSep) + t.depWarnTail + '</div>';
     }
     tip.innerHTML = html;
     tip.style.display = "block";
@@ -542,17 +630,16 @@ function bindTip(el, skill){
   });
   el.addEventListener("mouseleave", ()=>tip.style.display="none");
 }
-const esc = s => (s||"").replace(/[&<>"]/g, c=>(
-  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 /* ---- render ---- */
 function render(){
   tip.style.display = "none";
+  const t = T();
   // 左侧: 未装备
   const list = $("#armory-list");
   list.innerHTML = "";
   if(STATE.stored.length === 0){
-    list.innerHTML = '<div class="empty-hint">仓库空空如也 —— 所有技能皆已装备</div>';
+    list.innerHTML = '<div class="empty-hint">'+esc(t.armoryEmpty)+'</div>';
   }
   STATE.stored.forEach(s=>{
     const c = document.createElement("div");
@@ -596,6 +683,7 @@ function render(){
       if(s) bindTip(slot, s);
     } else {
       slot.classList.add("empty");
+      slot.dataset.label = t.emptySlot;
     }
     bindSlotDnD(slot, i);
     grid.appendChild(slot);
@@ -611,7 +699,7 @@ function bindSlotDnD(slot, idx){
     let d; try{ d = JSON.parse(e.dataTransfer.getData("text/plain")); }catch(_){return;}
     if(d.type === "armory"){
       // 仓库 -> 格子: 装备
-      if(STATE.layout[String(idx)]){ showToast("该格子已被占用"); return; }
+      if(STATE.layout[String(idx)]){ showToast(T().errors.slot_taken); return; }
       api("/api/equip", {dir:d.dir, slot:idx});
     } else if(d.type === "slot"){
       // 格子 -> 格子: 移动 / 交换
@@ -637,6 +725,25 @@ armoryList.addEventListener("drop", e=>{
   if(d.type === "slot"){ api("/api/unequip", {dir:d.dir}); }
 });
 
+/* ---- 应用语言 ---- */
+function applyLang(){
+  const t = T();
+  document.documentElement.lang = t.htmlLang;
+  document.title = t.title;
+  $("#h1").textContent = t.h1;
+  $("#sub").textContent = t.sub;
+  $("#armory-head").textContent = t.armoryHead;
+  $("#equip-head").textContent = t.equipHead;
+  $("#note").innerHTML = t.note;
+  $("#lang-btn").textContent = t.toggle;
+  render();
+}
+$("#lang-btn").addEventListener("click", ()=>{
+  LANG = (LANG === "zh") ? "en" : "zh";
+  localStorage.setItem("skill-armory-lang", LANG);
+  applyLang();
+});
+
 /* ---- api ---- */
 async function api(path, body){
   try{
@@ -645,23 +752,25 @@ async function api(path, body){
       body:JSON.stringify(body),
     });
     const data = await r.json();
-    if(!r.ok || data.error){ showToast(data.error || ("请求失败 "+r.status)); }
+    if(!r.ok || data.error){ showToast(errText(data)); }
     else {
       STATE = data; render();
-      if(path==="/api/equip")   showToast("已装备", true);
-      if(path==="/api/unequip") showToast("已收回仓库", true);
+      if(path==="/api/equip")   showToast(T().toastEquipped, true);
+      if(path==="/api/unequip") showToast(T().toastUnequipped, true);
     }
-  }catch(err){ showToast("网络错误: "+err); }
+  }catch(err){ showToast(T().netErr + err); }
 }
 
 async function load(){
   try{
     const r = await fetch("/api/skills");
     STATE = await r.json();
-    if(STATE.error){ showToast(STATE.error); return; }
+    if(STATE.error){ showToast(errText(STATE)); return; }
     render();
-  }catch(err){ showToast("加载失败: "+err); }
+  }catch(err){ showToast(T().netErr + err); }
 }
+
+applyLang();
 load();
 </script>
 </body>
@@ -672,17 +781,17 @@ load();
 
 def main():
     if not os.path.isdir(SKILLS_DIR):
-        print("错误: 找不到 %s" % SKILLS_DIR)
+        print("Error: skills directory not found: %s" % SKILLS_DIR)
         return
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print("技能装备栏已启动 ->  http://127.0.0.1:%d" % PORT)
-    print("已装备目录: %s" % SKILLS_DIR)
-    print("仓库目录:   %s  (首次卸下时创建)" % ARMORY_DIR)
-    print("按 Ctrl+C 停止。")
+    print("Skill Equipment is running ->  http://127.0.0.1:%d" % PORT)
+    print("  equipped (read by Claude): %s" % SKILLS_DIR)
+    print("  armory (unequipped store): %s  [created on first unequip]" % ARMORY_DIR)
+    print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n已停止。")
+        print("\nStopped.")
         server.shutdown()
 
 
